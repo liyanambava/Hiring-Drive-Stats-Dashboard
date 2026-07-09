@@ -317,6 +317,16 @@ def load_and_clean(file_bytes, file_name):
     out["vendor"]    = out["vendor"].astype(str).str.strip()
     out["demand_id"] = out["demand_id"].fillna("Unspecified").astype(str).str.strip()
     out["result"]    = out["status"].apply(classify_status)
+    # Convert date values in the 'week' column to ISO week labels (e.g. '2025-W03')
+    def _date_to_week(val):
+        if pd.isna(val):
+            return np.nan
+        try:
+            dt = pd.to_datetime(val)
+            return f"{dt.year}-W{dt.isocalendar().week:02d}"
+        except Exception:
+            return str(val).strip() or np.nan
+    out["week"] = out["week"].apply(_date_to_week)
     return out
 
 
@@ -622,20 +632,20 @@ with st.container():
     vendor_df = jrs_df if selected_vendor == "All" else jrs_df[jrs_df["vendor"] == selected_vendor]
 
     with f4:
-        st.markdown('<div class="filter-label">Screening Result</div>', unsafe_allow_html=True)
+        st.markdown('<div class="filter-label">Screening Status</div>', unsafe_allow_html=True)
         selected_result = st.selectbox(
-            "Screening Result",
-            ["All", "Accepted", "Rejected", "Other"],
+            "Screening Status",
+            ["All", "Screen Select", "Screen Reject"],
             label_visibility="collapsed",
         )
-    filtered_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["result"] == selected_result]
+    filtered_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["status"].str.strip() == selected_result]
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Drill-down KPI row — uses smaller value font (kpi-value-sm)
-n_acc = int((vendor_df["result"] == "Accepted").sum())
-n_rej = int((vendor_df["result"] == "Rejected").sum())
-n_oth = int((vendor_df["result"] == "Other").sum())
-acc_r = n_acc / len(vendor_df) if len(vendor_df) else 0
+n_acc = int((filtered_df["result"] == "Accepted").sum())
+n_rej = int((filtered_df["result"] == "Rejected").sum())
+n_oth = int((filtered_df["result"] == "Other").sum())
+acc_r = n_acc / len(filtered_df) if len(filtered_df) else 0
 
 def kpi_card_sm(label, value, sub=None, pill=None, pill_cls="pill-blue"):
     pill_html = f'<div class="kpi-pill {pill_cls}">{pill}</div>' if pill else ""
@@ -650,27 +660,27 @@ def kpi_card_sm(label, value, sub=None, pill=None, pill_cls="pill-blue"):
 
 dm1, dm2, dm3, dm4, dm5 = st.columns(5)
 with dm1:
-    st.markdown(kpi_card_sm("Candidates in Selection", f"{len(demand_df):,}"), unsafe_allow_html=True)
+    st.markdown(kpi_card_sm("Candidates in Selection", f"{len(filtered_df):,}"), unsafe_allow_html=True)
 with dm2:
-    st.markdown(kpi_card_sm("JRS Roles in Selection", jrs_df["jrs"].nunique()), unsafe_allow_html=True)
+    st.markdown(kpi_card_sm("JRS Roles in Selection", filtered_df["jrs"].nunique()), unsafe_allow_html=True)
 with dm3:
     st.markdown(kpi_card_sm("Accepted (filtered)", n_acc,
                             pill=f"{acc_r:.0%}", pill_cls="pill-green"), unsafe_allow_html=True)
 with dm4:
     st.markdown(kpi_card_sm("Rejected (filtered)", n_rej,
                             pill_cls="pill-red",
-                            pill=f"{n_rej/len(vendor_df):.0%}" if len(vendor_df) else "—"), unsafe_allow_html=True)
+                            pill=f"{n_rej/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
 with dm5:
     st.markdown(kpi_card_sm("Pending / Other", n_oth,
                             pill_cls="pill-amber",
-                            pill=f"{n_oth/len(vendor_df):.0%}" if len(vendor_df) else "—"), unsafe_allow_html=True)
+                            pill=f"{n_oth/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
 
 st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
 
-# Candidate table with styled result column
+# Candidate table (Result column intentionally excluded from UI; it is still exported to Excel)
 display_cols = {
     "demand_id": "Demand ID", "name": "Candidate Name", "jrs": "JRS",
-    "vendor": "Vendor", "status": "Screening Status", "result": "Result", "remarks": "Remarks",
+    "vendor": "Vendor", "status": "Screening Status", "remarks": "Remarks",
 }
 available_cols = [c for c in display_cols if c in filtered_df.columns]
 table_df = filtered_df[available_cols].rename(columns=display_cols).reset_index(drop=True)
