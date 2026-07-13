@@ -696,9 +696,9 @@ except Exception as _e:
 _kpi_week_options = ["All"] + ["Week 0"] + sorted(_friday_map.keys(), key=lambda l: _friday_map[l])
 
 # Read persisted week selection (default "Week 0" on first load)
-_kpi_week_default = st.session_state.get("kpi_week_sel", "Week 0")
+_kpi_week_default = st.session_state.get("kpi_week_sel", "All")
 if _kpi_week_default not in _kpi_week_options:
-    _kpi_week_default = "Week 0"
+    _kpi_week_default = "All"
 
 if _kpi_week_default == "Week 0":
     kpi_df = WEEK0_DATA
