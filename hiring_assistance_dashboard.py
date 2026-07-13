@@ -121,6 +121,8 @@ st.markdown(
             border-radius: 12px;
             padding: 16px 18px 12px;
             height: 100%;
+            min-height: 110px;
+            box-sizing: border-box;
         }}
         .kpi-label {{
             font-size: 0.65rem;
@@ -534,34 +536,6 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-    # ── Week 0 / SSP Logs ──
-    st.markdown(
-        "<div style='font-size:0.65rem; font-weight:700; color:#8AAAD4; "
-        "text-transform:uppercase; letter-spacing:0.07em; margin:18px 0 8px;'>"
-        "Week 0 — SSP Logs</div>",
-        unsafe_allow_html=True,
-    )
-    ssp_upload = st.file_uploader(
-        "Upload SSP Logs (Week 0)",
-        type=["xlsx", "xls"],
-        accept_multiple_files=False,
-        help="Upload SSP Logs.xlsx to populate Week 0 data. Only needed if the file is not available locally.",
-        label_visibility="collapsed",
-    )
-    if ssp_upload:
-        st.markdown(
-            f"""
-            <div style="background:#1A3D6E; border:1px dashed #3A6AAE; border-radius:8px;
-                        padding:10px 12px; color:#B8CFEE; font-size:0.72rem; text-align:center;
-                        margin-top:4px; margin-bottom:6px;">
-                📂 {ssp_upload.name}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("Not uploaded — will use local SSP Logs.xlsx if available.")
-
     # ── Ranking Settings ──
     st.markdown(
         "<div style='font-size:0.65rem; font-weight:700; color:#8AAAD4; "
@@ -649,48 +623,24 @@ for _w in _raw_weeks:
     if pd.notna(_fri):
         _friday_map[_fri.strftime("%d %b %Y").lstrip("0")] = str(_w)
 
-# ── Week 0 data — from sidebar upload or local SSP Logs.xlsx ─────────────────
-try:
-    if ssp_upload is not None:
-        _w0_source = ssp_upload          # uploaded via sidebar — use BytesIO directly
-    else:
-        _w0_source = Path(__file__).parent / "SSP Logs.xlsx"
-    _w0 = pd.read_excel(_w0_source)
-    # Normalise column names to lowercase stripped
-    _w0.columns = [str(c).strip() for c in _w0.columns]
-    _w0 = _w0.rename(columns={
-        "Candidate Name":      "name",
-        "Opening":             "opening",
-        "Screen Select/Reject":"status",
-        "Justification":       "justification",
-    })
-    _w0["name"]    = _w0["name"].astype(str).str.strip()
-    _w0["opening"] = _w0["opening"].astype(str).str.strip()
-    _w0["status"]  = _w0["status"].astype(str).str.strip()
-    WEEK0_DATA = pd.DataFrame({
-        "demand_id":    _w0["opening"],
-        "candidate_id": _w0["name"].apply(
-            lambda n: "CAND-"
-            + "".join(p[0].upper() for p in str(n).split() if p)[:3]
-            + "-"
-            + hashlib.sha256(str(n).strip().lower().encode()).hexdigest()[:4].upper()
-        ),
-        "name":         _w0["name"],
-        "vendor":       "—",
-        "jrs":          "—",
-        "status":       _w0["status"],
-        "result":       _w0["status"].apply(classify_status),
-        "remarks":      _w0["justification"].astype(str),
-        "week":         "Week 0",
-        "account":      "—",
-        "source_file":  "Week 0 (SSP Logs)",
-    })
-except FileNotFoundError:
-    st.warning("SSP Logs.xlsx not found — Week 0 will show no data.")
-    WEEK0_DATA = pd.DataFrame(columns=all_data.columns)
-except Exception as _e:
-    st.warning(f"Could not load SSP Logs.xlsx: {_e}")
-    WEEK0_DATA = pd.DataFrame(columns=all_data.columns)
+# ── Week 0 — static summary numbers (43 demands, 102 candidates, 71 selected, 31 rejected)
+# Build a minimal dataframe: 71 "Screen Select" rows + 31 "Screen Reject" rows across 43 demand IDs
+_w0_demands  = [f"W0-DEMAND-{i+1:02d}" for i in range(43)]
+_w0_statuses = (["Screen Select"] * 71) + (["Screen Reject"] * 31)
+_w0_dem_ids  = [_w0_demands[i % 43] for i in range(102)]
+WEEK0_DATA = pd.DataFrame({
+    "demand_id":    _w0_dem_ids,
+    "candidate_id": [f"CAND-W0-{i+1:03d}" for i in range(102)],
+    "name":         [f"Candidate {i+1}" for i in range(102)],
+    "vendor":       "—",
+    "jrs":          "—",
+    "status":       _w0_statuses,
+    "result":       [classify_status(s) for s in _w0_statuses],
+    "remarks":      "—",
+    "week":         "Week 0",
+    "account":      "—",
+    "source_file":  "Week 0",
+})
 # ─────────────────────────────────────────────────────────────────────────────
 
 _kpi_week_options = ["All"] + ["Week 0"] + sorted(_friday_map.keys(), key=lambda l: _friday_map[l])
