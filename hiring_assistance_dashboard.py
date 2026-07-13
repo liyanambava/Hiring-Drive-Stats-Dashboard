@@ -9,6 +9,7 @@ Run with:  streamlit run hiring_assistance_dashboard.py
 import hashlib
 import re
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -602,21 +603,98 @@ st.markdown(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KPI strip
+# KPI strip — with week filter
 # ─────────────────────────────────────────────────────────────────────────────
-total_demands    = all_data["demand_id"].nunique()
-total_candidates = len(all_data)
-total_accepted   = int((all_data["result"] == "Accepted").sum())
-total_rejected   = int((all_data["result"] == "Rejected").sum())
-total_other      = int((all_data["result"] == "Other").sum())
-overall_rate     = total_accepted / total_candidates if total_candidates else 0
-n_vendors        = all_data["vendor"].nunique()
-n_jrs            = all_data["jrs"].nunique()
 
-k1, k2, k3, k4, k5 = st.columns(5)
+# Build week-ending options (reused helper, same logic as drill-down filter)
+def _week_str_to_friday(w):
+    try:
+        monday = pd.to_datetime(str(w) + "-1", format="%G-W%V-%u")
+        return monday + pd.Timedelta(days=4)
+    except Exception:
+        return pd.NaT
+
+_raw_weeks   = all_data["week"].dropna().unique()
+_friday_map  = {}
+for _w in _raw_weeks:
+    _fri = _week_str_to_friday(str(_w))
+    if pd.notna(_fri):
+        _friday_map[_fri.strftime("%d %b %Y").lstrip("0")] = str(_w)
+
+# ── Week 0 data — loaded from SSP Logs.xlsx ──────────────────────────────────
+# Columns used: No | Candidate Name | Opening | Screen Select/Reject | Justification
+WEEK0_FILE = Path(__file__).parent / "SSP Logs.xlsx"
+try:
+    _w0 = pd.read_excel(WEEK0_FILE)
+    # Normalise column names to lowercase stripped
+    _w0.columns = [str(c).strip() for c in _w0.columns]
+    _w0 = _w0.rename(columns={
+        "Candidate Name":      "name",
+        "Opening":             "opening",
+        "Screen Select/Reject":"status",
+        "Justification":       "justification",
+    })
+    _w0["name"]    = _w0["name"].astype(str).str.strip()
+    _w0["opening"] = _w0["opening"].astype(str).str.strip()
+    _w0["status"]  = _w0["status"].astype(str).str.strip()
+    WEEK0_DATA = pd.DataFrame({
+        "demand_id":    _w0["opening"],
+        "candidate_id": _w0["name"].apply(
+            lambda n: "CAND-"
+            + "".join(p[0].upper() for p in str(n).split() if p)[:3]
+            + "-"
+            + hashlib.sha256(str(n).strip().lower().encode()).hexdigest()[:4].upper()
+        ),
+        "name":         _w0["name"],
+        "vendor":       "—",
+        "jrs":          "—",
+        "status":       _w0["status"],
+        "result":       _w0["status"].apply(classify_status),
+        "remarks":      _w0["justification"].astype(str),
+        "week":         "Week 0",
+        "account":      "—",
+        "source_file":  "Week 0 (SSP Logs)",
+    })
+except FileNotFoundError:
+    st.warning("SSP Logs.xlsx not found — Week 0 will show no data.")
+    WEEK0_DATA = pd.DataFrame(columns=all_data.columns)
+except Exception as _e:
+    st.warning(f"Could not load SSP Logs.xlsx: {_e}")
+    WEEK0_DATA = pd.DataFrame(columns=all_data.columns)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kpi_week_options = ["All"] + ["Week 0"] + sorted(_friday_map.keys(), key=lambda l: _friday_map[l])
+
+# Read persisted week selection (default "Week 0" on first load)
+_kpi_week_default = st.session_state.get("kpi_week_sel", "Week 0")
+if _kpi_week_default not in _kpi_week_options:
+    _kpi_week_default = "Week 0"
+
+if _kpi_week_default == "Week 0":
+    kpi_df = WEEK0_DATA
+elif _kpi_week_default == "All":
+    kpi_df = all_data
+else:
+    kpi_df = all_data[all_data["week"] == _friday_map.get(_kpi_week_default, "")]
+
+total_demands    = kpi_df["demand_id"].nunique()
+total_candidates = len(kpi_df)
+total_accepted   = int((kpi_df["result"] == "Accepted").sum())
+total_rejected   = int((kpi_df["result"] == "Rejected").sum())
+total_other      = int((kpi_df["result"] == "Other").sum())
+overall_rate     = total_accepted / total_candidates if total_candidates else 0
+n_vendors        = kpi_df["vendor"].nunique()
+n_jrs            = kpi_df["jrs"].nunique()
+
+_is_week0 = (_kpi_week_default == "Week 0")
+
+# Row 1 — 4 main KPI cards (equal width, full row)
+k1, k2, k3, k4 = st.columns(4)
 with k1:
+    # hide JRS pill when Week 0 (no JRS data)
     st.markdown(kpi_card("Demands", total_demands,
-                         pill=f"{n_jrs} JRS roles", pill_cls="pill-blue"), unsafe_allow_html=True)
+                         pill=None if _is_week0 else f"{n_jrs} JRS roles",
+                         pill_cls="pill-blue"), unsafe_allow_html=True)
 with k2:
     st.markdown(kpi_card("Candidates Screened", f"{total_candidates:,}",
                          sub=f"Across {total_demands} demand IDs"), unsafe_allow_html=True)
@@ -627,9 +705,31 @@ with k4:
     st.markdown(kpi_card("Rejected", f"{total_rejected:,}",
                          pill=f"{total_rejected/total_candidates:.1%} of total" if total_candidates else "—",
                          pill_cls="pill-red"), unsafe_allow_html=True)
-with k5:
-    st.markdown(kpi_card("Vendors Engaged", n_vendors,
-                         sub=f"Min. {min_submissions} CVs threshold"), unsafe_allow_html=True)
+
+# Row 2 — hide Vendors Engaged when Week 0 (no vendor data); always show Week Ending filter
+st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+if _is_week0:
+    # Only the filter, full width
+    _, k6 = st.columns([3, 1])
+else:
+    k5, k6 = st.columns(2)
+    with k5:
+        st.markdown(
+            f'<div class="kpi-card" style="padding:10px 16px;">'
+            f'  <div class="kpi-label">Vendors Engaged</div>'
+            f'  <div class="kpi-value-sm" style="margin-top:6px;">{n_vendors}</div>'
+            f'  <div class="kpi-sub" style="margin-top:4px;">Min. {min_submissions} CVs threshold</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+with k6:
+    st.markdown('<div class="filter-label">Week Ending</div>', unsafe_allow_html=True)
+    st.selectbox(
+        "KPI Week Ending", _kpi_week_options,
+        index=_kpi_week_options.index(_kpi_week_default),
+        key="kpi_week_sel",
+        label_visibility="collapsed",
+    )
 
 st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 
@@ -639,63 +739,73 @@ st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 sec_head("🔍", "Demand Drill-down")
 
 with st.container():
-    f1, f2, f3, f4, f5 = st.columns(5)
-    with f1:
-        st.markdown('<div class="filter-label">Demand ID</div>', unsafe_allow_html=True)
-        demand_options  = ["All"] + sorted(all_data["demand_id"].unique().tolist())
-        selected_demand = st.selectbox("Demand ID", demand_options, label_visibility="collapsed")
-    demand_df = all_data if selected_demand == "All" else all_data[all_data["demand_id"] == selected_demand]
-
-    with f2:
-        st.markdown('<div class="filter-label">JRS Role</div>', unsafe_allow_html=True)
-        jrs_options  = ["All"] + sorted(demand_df["jrs"].unique().tolist())
-        selected_jrs = st.selectbox("JRS Role", jrs_options, label_visibility="collapsed")
-    jrs_df = demand_df if selected_jrs == "All" else demand_df[demand_df["jrs"] == selected_jrs]
-
-    with f3:
-        st.markdown('<div class="filter-label">Vendor</div>', unsafe_allow_html=True)
-        vendor_options  = ["All"] + sorted(jrs_df["vendor"].unique().tolist())
-        selected_vendor = st.selectbox("Vendor", vendor_options, label_visibility="collapsed")
-    vendor_df = jrs_df if selected_vendor == "All" else jrs_df[jrs_df["vendor"] == selected_vendor]
-
-    with f4:
-        st.markdown('<div class="filter-label">Screening Status</div>', unsafe_allow_html=True)
-        selected_result = st.selectbox(
-            "Screening Status",
-            ["All", "Screen Select", "Screen Reject"],
-            label_visibility="collapsed",
-        )
-    status_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["status"].str.strip() == selected_result]
-
-    with f5:
-        st.markdown('<div class="filter-label">Week Ending (Friday)</div>', unsafe_allow_html=True)
-        # Build week-ending options from the raw dates stored in all_data["week"]
-        # all_data["week"] holds ISO strings like "2025-W03"; convert to the Friday of that week
-        def _week_str_to_friday(w):
-            try:
-                # parse ISO week string → Monday of that week → add 4 days to get Friday
-                monday = pd.to_datetime(w + "-1", format="%G-W%V-%u")
-                return monday + pd.Timedelta(days=4)
-            except Exception:
-                return pd.NaT
-
-        raw_weeks = all_data["week"].dropna().unique()
-        friday_map = {}  # label → ISO week string
-        for w in raw_weeks:
-            friday = _week_str_to_friday(str(w))
-            if pd.notna(friday):
-                label = friday.strftime("%d %b %Y")
-                friday_map[label] = str(w)
-
-        week_options = ["All"] + sorted(friday_map.keys(),
-                                        key=lambda lbl: friday_map[lbl])
-        selected_week = st.selectbox("Week Ending", week_options, label_visibility="collapsed")
-
-    if selected_week == "All":
+    if _is_week0:
+        # Week 0 has no JRS/vendor — show only Demand + Screening Status filters
+        _src_df = WEEK0_DATA
+        f1, f2 = st.columns(2)
+        with f1:
+            st.markdown('<div class="filter-label">Demand ID</div>', unsafe_allow_html=True)
+            demand_options  = ["All"] + sorted(_src_df["demand_id"].dropna().unique().tolist())
+            selected_demand = st.selectbox("Demand ID", demand_options, label_visibility="collapsed")
+        demand_df  = _src_df if selected_demand == "All" else _src_df[_src_df["demand_id"] == selected_demand]
+        jrs_df     = demand_df
+        vendor_df  = demand_df
+        with f2:
+            st.markdown('<div class="filter-label">Screening Status</div>', unsafe_allow_html=True)
+            selected_result = st.selectbox(
+                "Screening Status",
+                ["All", "Screen Select", "Screen Reject"],
+                label_visibility="collapsed",
+            )
+        status_df  = demand_df if selected_result == "All" else demand_df[demand_df["status"].str.strip() == selected_result]
         filtered_df = status_df
+        selected_week = "All"   # no week sub-filter for Week 0
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        filtered_df = status_df[status_df["week"] == friday_map[selected_week]]
-    st.markdown('</div>', unsafe_allow_html=True)
+        f1, f2, f3, f4, f5 = st.columns(5)
+        with f1:
+            st.markdown('<div class="filter-label">Demand ID</div>', unsafe_allow_html=True)
+            demand_options  = ["All"] + sorted(all_data["demand_id"].unique().tolist())
+            selected_demand = st.selectbox("Demand ID", demand_options, label_visibility="collapsed")
+        demand_df = all_data if selected_demand == "All" else all_data[all_data["demand_id"] == selected_demand]
+
+        with f2:
+            st.markdown('<div class="filter-label">JRS Role</div>', unsafe_allow_html=True)
+            jrs_options  = ["All"] + sorted(demand_df["jrs"].unique().tolist())
+            selected_jrs = st.selectbox("JRS Role", jrs_options, label_visibility="collapsed")
+        jrs_df = demand_df if selected_jrs == "All" else demand_df[demand_df["jrs"] == selected_jrs]
+
+        with f3:
+            st.markdown('<div class="filter-label">Vendor</div>', unsafe_allow_html=True)
+            vendor_options  = ["All"] + sorted(jrs_df["vendor"].unique().tolist())
+            selected_vendor = st.selectbox("Vendor", vendor_options, label_visibility="collapsed")
+        vendor_df = jrs_df if selected_vendor == "All" else jrs_df[jrs_df["vendor"] == selected_vendor]
+
+        with f4:
+            st.markdown('<div class="filter-label">Screening Status</div>', unsafe_allow_html=True)
+            selected_result = st.selectbox(
+                "Screening Status",
+                ["All", "Screen Select", "Screen Reject"],
+                label_visibility="collapsed",
+            )
+        status_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["status"].str.strip() == selected_result]
+
+        with f5:
+            st.markdown('<div class="filter-label">Week Ending (Friday)</div>', unsafe_allow_html=True)
+            raw_weeks  = all_data["week"].dropna().unique()
+            friday_map = {}
+            for w in raw_weeks:
+                _fri2 = _week_str_to_friday(str(w))
+                if pd.notna(_fri2):
+                    friday_map[_fri2.strftime("%d %b %Y").lstrip("0")] = str(w)
+            week_options  = ["All"] + sorted(friday_map.keys(), key=lambda lbl: friday_map[lbl])
+            selected_week = st.selectbox("Week Ending", week_options, label_visibility="collapsed")
+
+        if selected_week == "All":
+            filtered_df = status_df
+        else:
+            filtered_df = status_df[status_df["week"] == friday_map[selected_week]]
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # Drill-down KPI row — uses smaller value font (kpi-value-sm)
 n_acc = int((filtered_df["result"] == "Accepted").sum())
@@ -714,22 +824,35 @@ def kpi_card_sm(label, value, sub=None, pill=None, pill_cls="pill-blue"):
         f'</div>'
     )
 
-dm1, dm2, dm3, dm4, dm5 = st.columns(5)
-with dm1:
-    st.markdown(kpi_card_sm("Candidates in Selection", f"{len(filtered_df):,}"), unsafe_allow_html=True)
-with dm2:
-    st.markdown(kpi_card_sm("JRS Roles in Selection", filtered_df["jrs"].nunique()), unsafe_allow_html=True)
-with dm3:
-    st.markdown(kpi_card_sm("Accepted (filtered)", n_acc,
-                            pill=f"{acc_r:.0%}", pill_cls="pill-green"), unsafe_allow_html=True)
-with dm4:
-    st.markdown(kpi_card_sm("Rejected (filtered)", n_rej,
-                            pill_cls="pill-red",
-                            pill=f"{n_rej/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
-with dm5:
-    st.markdown(kpi_card_sm("Pending / Other", n_oth,
-                            pill_cls="pill-amber",
-                            pill=f"{n_oth/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
+if _is_week0:
+    # Week 0: clean 3-card row — Candidates, Selected, Rejected only
+    dm1, dm2, dm3 = st.columns(3)
+    with dm1:
+        st.markdown(kpi_card_sm("Candidates in Selection", f"{len(filtered_df):,}"), unsafe_allow_html=True)
+    with dm2:
+        st.markdown(kpi_card_sm("Selected (filtered)", n_acc,
+                                pill=f"{acc_r:.0%}", pill_cls="pill-green"), unsafe_allow_html=True)
+    with dm3:
+        st.markdown(kpi_card_sm("Rejected (filtered)", n_rej,
+                                pill_cls="pill-red",
+                                pill=f"{n_rej/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
+else:
+    dm1, dm2, dm3, dm4, dm5 = st.columns(5)
+    with dm1:
+        st.markdown(kpi_card_sm("Candidates in Selection", f"{len(filtered_df):,}"), unsafe_allow_html=True)
+    with dm2:
+        st.markdown(kpi_card_sm("JRS Roles in Selection", filtered_df["jrs"].nunique()), unsafe_allow_html=True)
+    with dm3:
+        st.markdown(kpi_card_sm("Accepted (filtered)", n_acc,
+                                pill=f"{acc_r:.0%}", pill_cls="pill-green"), unsafe_allow_html=True)
+    with dm4:
+        st.markdown(kpi_card_sm("Rejected (filtered)", n_rej,
+                                pill_cls="pill-red",
+                                pill=f"{n_rej/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
+    with dm5:
+        st.markdown(kpi_card_sm("Pending / Other", n_oth,
+                                pill_cls="pill-amber",
+                                pill=f"{n_oth/len(filtered_df):.0%}" if len(filtered_df) else "—"), unsafe_allow_html=True)
 
 st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
 
@@ -933,9 +1056,21 @@ if has_week:
             Rejected=("result",  lambda s: (s == "Rejected").sum()),
         )
         .reset_index()
-        .rename(columns={"week": "Screened Week"})
     )
     weekly["Acceptance Rate %"] = (weekly["Accepted"] / weekly["Total_Screened"] * 100).round(1)
+    # Convert ISO week string (e.g. "2025-W03") → Friday of that week (e.g. "17 Jan 2025")
+    def _week_to_ending(w):
+        try:
+            monday = pd.to_datetime(str(w) + "-1", format="%G-W%V-%u")
+            return (monday + pd.Timedelta(days=4)).strftime("%d %b %Y").lstrip("0")
+        except Exception:
+            return str(w)
+    weekly["Screened Week"] = weekly["week"].apply(_week_to_ending)
+    # Sort by original ISO week so chart order is chronological
+    weekly = (weekly.sort_values("week")
+              .drop(columns=["week"])
+              .reset_index(drop=True)
+              [["Screened Week", "Total_Screened", "Accepted", "Rejected", "Acceptance Rate %"]])
 
     fig_week = go.Figure()
     fig_week.add_trace(go.Scatter(
