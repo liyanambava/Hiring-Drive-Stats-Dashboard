@@ -6,6 +6,7 @@ A Streamlit app for CV-screening trackers (Shell / Qlik Sense style sheets).
 Run with:  streamlit run hiring_assistance_dashboard.py
 """
 
+import hashlib
 import re
 from io import BytesIO
 
@@ -244,7 +245,7 @@ COLUMN_KEYWORDS = {
     "jrs":       ["jrs"],
     "status":    ["screen select reason", "screening status", "status", "screen result", "screen"],
     "remarks":   ["remarks or comments", "remarks", "comments", "reason"],
-    "week":      ["screened week", "week"],
+    "week":      ["screened date", "screened week", "week", "date"],
 }
 
 
@@ -303,7 +304,7 @@ def load_and_clean(file_bytes, file_name):
             continue
         df = pd.DataFrame()
         for field, src_col in col_map.items():
-            df[field] = raw[src_col] if src_col else np.nan
+            df[field] = raw[src_col] if  src_col else np.nan
         df = df.dropna(subset=["vendor"], how="any")
         df = df[df["vendor"].astype(str).str.strip() != ""]
         if df.empty:
@@ -313,10 +314,18 @@ def load_and_clean(file_bytes, file_name):
     if not frames:
         return pd.DataFrame(columns=list(COLUMN_KEYWORDS) + ["source_file"])
     out = pd.concat(frames, ignore_index=True)
-    out["jrs"]       = out["jrs"].fillna("Unspecified JRS").astype(str).str.strip()
+    out["jrs"]       = out["jrs"].fillna("Unspecified JRS").astype(str).str.strip().str.replace(r"\s*-\s*", "-", regex=True)
     out["vendor"]    = out["vendor"].astype(str).str.strip()
     out["demand_id"] = out["demand_id"].fillna("Unspecified").astype(str).str.strip()
     out["result"]    = out["status"].apply(classify_status)
+    # Generate stable Candidate ID: CAND-{initials}-{4-char hash of normalised name}
+    def _make_candidate_id(name):
+        n = str(name).strip()
+        parts = n.split()
+        initials = "".join(p[0].upper() for p in parts if p)[:3]  # up to 3 initials
+        h = hashlib.sha256(n.lower().encode()).hexdigest()[:4].upper()
+        return f"CAND-{initials}-{h}"
+    out["candidate_id"] = out["name"].apply(_make_candidate_id)
     # Convert date values in the 'week' column to ISO week labels (e.g. '2025-W03')
     def _date_to_week(val):
         if pd.isna(val):
@@ -416,14 +425,33 @@ def build_excel_report(all_data, vendor_stats_display, top_vendors_display, best
     write_df(ws4, best_vendor_per_jrs, title="Best-Performing Vendor for Each JRS", highlight_col="Best Vendor")
 
     if has_week:
+        from openpyxl.chart import LineChart
         ws5 = wb.create_sheet("Weekly Breakdown")
         ws5.sheet_view.showGridLines = False
-        write_df(ws5, weekly, title="Weekly Screening Breakdown")
+        last_row_w = write_df(ws5, weekly, title="Weekly Screening Breakdown")
+        if len(weekly):
+            # header is on row 3 (title row 1, blank row 2, header row 3)
+            hr_w = 3
+            n_w  = len(weekly)
+            wk_chart = LineChart()
+            wk_chart.title  = "Weekly Screening Trend"
+            wk_chart.y_axis.title = "Candidates"
+            wk_chart.x_axis.title = "Week"
+            wk_chart.style  = 10
+            wk_chart.height = 12
+            wk_chart.width  = 24
+            # columns: Screened Week(1), Total_Screened(2), Accepted(3), Rejected(4), Acceptance Rate %(5)
+            for col_idx, series_title in [(2, "Total Screened"), (3, "Accepted"), (4, "Rejected")]:
+                data_ref = Reference(ws5, min_col=col_idx, min_row=hr_w, max_row=hr_w + n_w)
+                wk_chart.add_data(data_ref, titles_from_data=True)
+            cats_ref = Reference(ws5, min_col=1, min_row=hr_w + 1, max_row=hr_w + n_w)
+            wk_chart.set_categories(cats_ref)
+            ws5.add_chart(wk_chart, f"A{last_row_w + 2}")
 
     ws6 = wb.create_sheet("Raw Data")
     ws6.sheet_view.showGridLines = False
     raw_display = all_data.rename(columns={
-        "demand_id": "Demand ID (PMP)", "name": "Candidate Name", "pan": "PAN Number",
+        "demand_id": "Demand ID (PMP)", "candidate_id": "Candidate ID",
         "vendor": "Vendor", "account": "Account", "jrs": "JRS",
         "status": "Screening Status", "result": "Result",
         "remarks": "Remarks", "week": "Screened Week", "source_file": "Source File",
@@ -587,13 +615,13 @@ n_jrs            = all_data["jrs"].nunique()
 
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    st.markdown(kpi_card("Open Demands", total_demands,
+    st.markdown(kpi_card("Demands", total_demands,
                          pill=f"{n_jrs} JRS roles", pill_cls="pill-blue"), unsafe_allow_html=True)
 with k2:
     st.markdown(kpi_card("Candidates Screened", f"{total_candidates:,}",
                          sub=f"Across {total_demands} demand IDs"), unsafe_allow_html=True)
 with k3:
-    st.markdown(kpi_card("Accepted", f"{total_accepted:,}",
+    st.markdown(kpi_card("Selected", f"{total_accepted:,}",
                          pill=f"{overall_rate:.1%} acceptance rate", pill_cls="pill-green"), unsafe_allow_html=True)
 with k4:
     st.markdown(kpi_card("Rejected", f"{total_rejected:,}",
@@ -608,11 +636,10 @@ st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 1 — Demand Drill-down
 # ─────────────────────────────────────────────────────────────────────────────
-sec_head("🔍", "Demand Drill-down", badge="Cascading Filters")
+sec_head("🔍", "Demand Drill-down")
 
 with st.container():
-    st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     with f1:
         st.markdown('<div class="filter-label">Demand ID</div>', unsafe_allow_html=True)
         demand_options  = ["All"] + sorted(all_data["demand_id"].unique().tolist())
@@ -638,7 +665,36 @@ with st.container():
             ["All", "Screen Select", "Screen Reject"],
             label_visibility="collapsed",
         )
-    filtered_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["status"].str.strip() == selected_result]
+    status_df = vendor_df if selected_result == "All" else vendor_df[vendor_df["status"].str.strip() == selected_result]
+
+    with f5:
+        st.markdown('<div class="filter-label">Week Ending (Friday)</div>', unsafe_allow_html=True)
+        # Build week-ending options from the raw dates stored in all_data["week"]
+        # all_data["week"] holds ISO strings like "2025-W03"; convert to the Friday of that week
+        def _week_str_to_friday(w):
+            try:
+                # parse ISO week string → Monday of that week → add 4 days to get Friday
+                monday = pd.to_datetime(w + "-1", format="%G-W%V-%u")
+                return monday + pd.Timedelta(days=4)
+            except Exception:
+                return pd.NaT
+
+        raw_weeks = all_data["week"].dropna().unique()
+        friday_map = {}  # label → ISO week string
+        for w in raw_weeks:
+            friday = _week_str_to_friday(str(w))
+            if pd.notna(friday):
+                label = friday.strftime("%d %b %Y")
+                friday_map[label] = str(w)
+
+        week_options = ["All"] + sorted(friday_map.keys(),
+                                        key=lambda lbl: friday_map[lbl])
+        selected_week = st.selectbox("Week Ending", week_options, label_visibility="collapsed")
+
+    if selected_week == "All":
+        filtered_df = status_df
+    else:
+        filtered_df = status_df[status_df["week"] == friday_map[selected_week]]
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Drill-down KPI row — uses smaller value font (kpi-value-sm)
@@ -677,9 +733,9 @@ with dm5:
 
 st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
 
-# Candidate table (Result column intentionally excluded from UI; it is still exported to Excel)
+# Candidate table (name replaced with stable ID; Result column excluded from UI but kept in Excel)
 display_cols = {
-    "demand_id": "Demand ID", "name": "Candidate Name", "jrs": "JRS",
+    "demand_id": "Demand ID", "candidate_id": "Candidate ID", "jrs": "JRS",
     "vendor": "Vendor", "status": "Screening Status", "remarks": "Remarks",
 }
 available_cols = [c for c in display_cols if c in filtered_df.columns]
@@ -734,7 +790,7 @@ top_vendors_display = top_vendors[
     ["Rank", "Vendor", "Total_Submitted", "Accepted", "Acceptance Rate", "Acceptance Rate %"]
 ]
 
-# Row 1 — full-width bar chart
+# Bar chart — full width but compact height
 fig_bar = px.bar(
     vendor_stats_display.sort_values("Acceptance Rate %"),
     x="Acceptance Rate %", y="Vendor",
@@ -744,15 +800,15 @@ fig_bar = px.bar(
     color_continuous_scale=["#F4CCCC", "#FFE699", "#C6EFCE"],
     labels={"Acceptance Rate %": "Acceptance Rate (%)"},
 )
-fig_bar.update_traces(textposition="outside", textfont_size=11)
+fig_bar.update_traces(textposition="outside", textfont_size=10)
 fig_bar.update_layout(
-    height=max(320, len(vendor_stats_display) * 38),
-    margin=dict(t=10, b=10, l=10, r=60),
+    height=min(max(220, len(vendor_stats_display) * 28), 360),
+    margin=dict(t=10, b=10, l=10, r=50),
     coloraxis_showscale=False,
     plot_bgcolor="white",
     paper_bgcolor="white",
-    yaxis=dict(tickfont=dict(size=12)),
-    xaxis=dict(gridcolor="#EEEEEE", zeroline=False),
+    yaxis=dict(tickfont=dict(size=10)),
+    xaxis=dict(gridcolor="#EEEEEE", zeroline=False, tickfont=dict(size=10)),
 )
 st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -791,7 +847,8 @@ with vc2:
 
 with vc3:
     st.markdown(f"<div style='font-size:0.8rem; font-weight:700; color:{NAVY}; margin-bottom:8px;'>🏆 Top {top_n} Vendors</div>", unsafe_allow_html=True)
-    st.dataframe(top_vendors_display, use_container_width=True, hide_index=True, height=320)
+    st.dataframe(top_vendors_display, use_container_width=True, hide_index=True,
+                 height=35 * (len(top_vendors_display) + 1) + 3)
 
 with st.expander("View full vendor performance table"):
     st.dataframe(vendor_stats_display, use_container_width=True, hide_index=True)
