@@ -534,6 +534,34 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
+    # ── Week 0 / SSP Logs ──
+    st.markdown(
+        "<div style='font-size:0.65rem; font-weight:700; color:#8AAAD4; "
+        "text-transform:uppercase; letter-spacing:0.07em; margin:18px 0 8px;'>"
+        "Week 0 — SSP Logs</div>",
+        unsafe_allow_html=True,
+    )
+    ssp_upload = st.file_uploader(
+        "Upload SSP Logs (Week 0)",
+        type=["xlsx", "xls"],
+        accept_multiple_files=False,
+        help="Upload SSP Logs.xlsx to populate Week 0 data. Only needed if the file is not available locally.",
+        label_visibility="collapsed",
+    )
+    if ssp_upload:
+        st.markdown(
+            f"""
+            <div style="background:#1A3D6E; border:1px dashed #3A6AAE; border-radius:8px;
+                        padding:10px 12px; color:#B8CFEE; font-size:0.72rem; text-align:center;
+                        margin-top:4px; margin-bottom:6px;">
+                📂 {ssp_upload.name}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Not uploaded — will use local SSP Logs.xlsx if available.")
+
     # ── Ranking Settings ──
     st.markdown(
         "<div style='font-size:0.65rem; font-weight:700; color:#8AAAD4; "
@@ -621,11 +649,13 @@ for _w in _raw_weeks:
     if pd.notna(_fri):
         _friday_map[_fri.strftime("%d %b %Y").lstrip("0")] = str(_w)
 
-# ── Week 0 data — loaded from SSP Logs.xlsx ──────────────────────────────────
-# Columns used: No | Candidate Name | Opening | Screen Select/Reject | Justification
-WEEK0_FILE = Path(__file__).parent / "SSP Logs.xlsx"
+# ── Week 0 data — from sidebar upload or local SSP Logs.xlsx ─────────────────
 try:
-    _w0 = pd.read_excel(WEEK0_FILE)
+    if ssp_upload is not None:
+        _w0_source = ssp_upload          # uploaded via sidebar — use BytesIO directly
+    else:
+        _w0_source = Path(__file__).parent / "SSP Logs.xlsx"
+    _w0 = pd.read_excel(_w0_source)
     # Normalise column names to lowercase stripped
     _w0.columns = [str(c).strip() for c in _w0.columns]
     _w0 = _w0.rename(columns={
